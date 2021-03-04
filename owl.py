@@ -1,7 +1,7 @@
 import numpy as np
 import tensorflow as tf
-from tensorflow.python.ops.gen_array_ops import shape
 
+from fista import fista
 
 
 def generate_data(N,K):
@@ -47,13 +47,10 @@ def generate_data1(n_samples = 10,n_features = 100):
         tf.expand_dims(tf.constant(coef,dtype=tf.float32),axis=1)
 
 
-
-
-
 class OwlRegressor():
 
-    def __init__(self, weights,max_iter=500,
-                 max_linesearch=20, eta=2.0, tol=1e-3,verbose=1):
+    def __init__(self, weights,max_iter=2000,
+                 max_linesearch=20, eta=0.5, tol=1e-6,verbose=1):
         self.weights = weights
         self.max_iter = max_iter
         self.max_linesearch = max_linesearch
@@ -96,61 +93,52 @@ class OwlRegressor():
 
         return tf.expand_dims(tf.sign(b)*v_abs,axis=1)
 
-    
+    def fit(self,Y,X):
+        def loss_fn(coef,grad=False):
+            return self.loss(Y,X,coef,grad)
+        
+        def prox_fn(coef,tau):
+            return self.prox_owl(coef,self.weights*tau)
 
-    
-    def fit(self,Y, X,  max_iter=2000, max_linesearch=100, eta=0.5, tol=1e-6,
-          verbose=1):
+        coef=tf.zeros(shape=[X.shape[1],1])
 
-        x0=tf.zeros(shape=[X.shape[1],1])
-        y = x0
-        x = y
-        tau = 1.0
-        t = 1.0
-
-        for it in range(max_iter):
-            f_old, grad = self.loss(Y,X,y, True)
-
-            for ls in range(max_linesearch):
-                y_proj = self.prox_owl(y - grad *tau, self.weights*tau)
-                diff = y_proj - y
-                sqdist = tf.matmul(diff,diff,transpose_a=True)
-                dist = tf.sqrt(sqdist)
-
-                F = self.loss(Y,X,y_proj)
-                Q = f_old + tf.matmul(diff, grad,transpose_a=True) + 0.5 * sqdist/tau
-
-                if F <= Q:
-                    print("break")
-                    break
-
-                tau *= eta
-
-            if ls == max_linesearch - 1 and verbose:
-                print("Line search did not converge.")
-
-            if verbose:
-                print("%d. %f" % (it + 1, dist))
-
-            if dist <= tol:
-                if verbose:
-                    print("Converged.")
-                break
-
-            x_next = y_proj
-            t_next = (1 + np.sqrt(1 + 4 * t ** 2)) / 2.
-            y = x_next + (t-1) / t_next * (x_next - x)
-            t = t_next
-            x = x_next
-
-        self.coef=y_proj
+        self.coef=fista(loss_fn,prox_fn,coef,self.max_iter,
+                        self.max_linesearch,self.eta,self.tol,self.verbose)
 
 
-def fista_owl(N=100,K=90):
-    y,simX,b=generate_data(N,K)
+class OSCARRegressor(OwlRegressor):
+    def __init__(self, weights, max_iter=2000,
+                 max_linesearch=20, eta=0.5, tol=1e-6,verbose=1):
+        super().__init__(weights, max_iter=max_iter, 
+                        max_linesearch=max_linesearch, eta=eta, tol=tol, verbose=verbose)
 
-    alpha = 0.001
-    
+    def oscar_weights(self,n_features):
+        alpha,beta=self.weights
+        w=tf.range(n_features-1,limit=-1,delta=-1,dtype=tf.float32)
+        w*=beta
+        w+=alpha
+        return w
+
+    def fit(self,Y,X):
+        def loss_fn(coef,grad=False):
+            return self.loss(Y,X,coef,grad)
+        
+        def prox_fn(coef,tau):
+            return self.prox_owl(coef,self.weights*tau)
+
+        coef=tf.zeros(shape=[X.shape[1],1])
+        self.weights=self.oscar_weights(X.shape[1])
+
+        self.coef=fista(loss_fn,prox_fn,coef,self.max_iter,
+                        self.max_linesearch,self.eta,self.tol,self.verbose)
+
+def fista_owl(N,K,gen):
+    y,simX,b=gen(N,K)
+
+    alpha = 0.0001
+    beta = 0.01  # only in OWL
+    max_iter=2000
+    tol=1e-6
 
     import matplotlib.pyplot as plt
     plt.figure()
@@ -165,21 +153,30 @@ def fista_owl(N=100,K=90):
     lasso_skl = Lasso(alpha=alpha / (2 * N), fit_intercept=False)
     lasso_skl.fit(y, simX)
     plt.stem(np.arange(K), lasso_skl.coef_)
-    plt.title("LASSO coefficients (scikit-learn)")
+    plt.title("OWL coefficients (scikit-learn)")
+
 
     plt.subplot(223)
-    owl=OwlRegressor(weights=tf.ones(K)*alpha)
+    owl=OwlRegressor(weights=tf.ones(K)*alpha,max_iter=max_iter,
+                 max_linesearch=20, eta=0.5, tol=tol,verbose=1)
     owl.fit(y,simX)
     plt.stem(np.arange(K), owl.coef)
-    plt.title("LASSO coefficients (pyowl)")
+    plt.title("OWL coefficients")
 
     plt.subplot(224)
-    plt.stem(np.arange(K), owl.coef-b)
-    plt.title("LASSO errors (pyowl)")
+    oscar=OSCARRegressor(weights=(alpha,beta),max_iter=max_iter,
+                 max_linesearch=20, eta=0.5, tol=tol,verbose=1)
+    oscar.fit(y,simX)
+    plt.stem(np.arange(K), oscar.coef)
+    plt.title("OSCAR coefficients")
 
     plt.tight_layout()
-    plt.savefig(f"my_toy_example{N}.png")
+    plt.savefig(f"OWL_{N}_maxIt{max_iter}_tol_{tol}.png")
 
-fista_owl(N=100,K=90)
-fista_owl(N=1000,K=90)
-fista_owl(N=70,K=90)
+
+
+
+fista_owl(10,100,generate_data1)
+fista_owl(70,90,generate_data)
+fista_owl(100,90,generate_data)
+fista_owl(1000,90,generate_data)
